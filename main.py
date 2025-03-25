@@ -1,25 +1,25 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import FileResponse
 from pathlib import Path
-import shutil
+from io import BytesIO
 from PIL import Image, ImageOps
-import numpy as np
+import shutil
 from ultralytics import YOLO
+import numpy as np
 import uuid
 
-app = FastAPI()
-
-# モデルロード
-model = YOLO("yolov8n.pt")
-
-# 出力設定
+# --- 共通定数と初期化 ---
 OUTPUT_WIDTH, OUTPUT_HEIGHT = 750, 900
 OUTPUT_FOLDER = Path("output")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
+model = YOLO("yolov8n.pt")
 
-# 人物検出
+app = FastAPI()
+
+
+# --- 共通処理 ---
 def detect_person_box(img):
-    results = model(np.array(img))
+    results = model(img)
     for result in results:
         boxes = result.boxes.xyxy.cpu().numpy()
         if len(boxes) > 0:
@@ -28,28 +28,50 @@ def detect_person_box(img):
             return x1, y1, x2, y2
     return None
 
-# リサイズ処理
+
 def resize_with_padding(img):
     return ImageOps.fit(img, (OUTPUT_WIDTH, OUTPUT_HEIGHT), method=Image.LANCZOS, bleed=0.02)
 
-@app.post("/trim/")
+
+def process_image(img: Image.Image) -> Image.Image:
+    box = detect_person_box(img)
+    if box:
+        img = img.crop(box)
+    return resize_with_padding(img)
+
+
+# --- FastAPIエンドポイント ---
+@app.post("/trim")
 async def trim_image(file: UploadFile = File(...)):
-    # 一時保存
-    temp_path = Path("temp") / f"{uuid.uuid4()}.png"
-    temp_path.parent.mkdir(exist_ok=True)
+    temp_path = Path(f"tmp_{uuid.uuid4().hex}.png")
+
     with temp_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
     img = Image.open(temp_path).convert("RGB")
-    box = detect_person_box(img)
-
-    if box:
-        cropped = img.crop(box)
-        resized = resize_with_padding(cropped)
-    else:
-        resized = resize_with_padding(img)
+    resized = process_image(img)
 
     output_path = OUTPUT_FOLDER / f"trimmed_{temp_path.stem}.png"
-    resized.save(output_path, "PNG", compress_level=6)
+    resized.save(output_path)
 
-    return FileResponse(path=output_path, media_type="image/png", filename=output_path.name)
+    temp_path.unlink()  # 一時ファイル削除
+
+    return FileResponse(output_path)
+
+
+# --- 一括処理モード ---
+if __name__ == "__main__":
+    print("📁 一括処理モード起動中…")
+
+    INPUT_FOLDER = Path("input")
+    OUTPUT_FOLDER.mkdir(exist_ok=True)
+
+    for img_file in INPUT_FOLDER.glob("*.jpg"):
+        print(f"🖼️ 処理中: {img_file.name}")
+        img = Image.open(img_file).convert("RGB")
+        result = process_image(img)
+        output_path = OUTPUT_FOLDER / f"{img_file.stem}_trimmed.png"
+        result.save(output_path)
+
+    print("✅ 一括処理が完了しました。")
+
