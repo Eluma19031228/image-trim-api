@@ -10,6 +10,16 @@ import numpy as np
 from ultralytics import YOLO
 
 app = FastAPI()
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 後でNext.jsドメインだけに絞ってもOK
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --- 設定 ---
 OUTPUT_WIDTH, OUTPUT_HEIGHT = 750, 900
