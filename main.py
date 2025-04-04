@@ -76,5 +76,9 @@ async def batch_trim_zip(files: List[UploadFile] = File(...)):
             output_img_path.unlink(missing_ok=True)
 
     return FileResponse(zip_path, filename=zip_name, media_type='application/zip')
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+
 
 
