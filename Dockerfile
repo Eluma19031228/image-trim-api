@@ -16,9 +16,8 @@ COPY . .
 # 依存パッケージをインストール
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Railway用にポートを明示（環境変数として）
-ENV PORT=8080
+# EXPOSEはそのままでOK（あくまで「意図の表明」）
 EXPOSE 8080
 
-# CMDは $PORT を使って柔軟に対応（Railway推奨）
+# CMDは環境変数 $PORT を柔軟に読み取るように設定
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
