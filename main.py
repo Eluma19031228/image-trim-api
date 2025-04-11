@@ -1,6 +1,7 @@
 import zipfile
 import shutil
 import uuid
+import os
 from pathlib import Path
 from typing import List
 from fastapi import FastAPI, UploadFile, File
@@ -15,7 +16,7 @@ app = FastAPI()
 # --- CORS設定（Next.jsなどからアクセス許可）---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 必要なら ["https://your-frontend.vercel.app"] に限定
+    allow_origins=["*"],  # 本番は ["https://your-frontend.vercel.app"] に限定可
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,8 +25,20 @@ app.add_middleware(
 # --- 初期設定 ---
 OUTPUT_WIDTH, OUTPUT_HEIGHT = 750, 900
 OUTPUT_FOLDER = Path("output")
-OUTPUT_FOLDER.mkdir(exist_ok=True)
-model = YOLO("yolov8n.pt")  # モデルファイルはプロジェクト直下に配置すること
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+MODEL_PATH = Path("yolov8n.pt")
+
+# --- モデル存在確認 & 自動ダウンロード（クラウド用）---
+if not MODEL_PATH.exists():
+    import requests
+    url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
+    print(f"🔽 モデルをダウンロード中: {url}")
+    with open(MODEL_PATH, "wb") as f:
+        f.write(requests.get(url).content)
+    print("✅ モデルのダウンロード完了")
+
+model = YOLO(str(MODEL_PATH))
 
 # --- 人物検出 ---
 def detect_person_box(img):
@@ -78,12 +91,12 @@ async def batch_trim_zip(files: List[UploadFile] = File(...)):
     print(f"📦 ZIP生成完了: {zip_path}")
     return FileResponse(zip_path, filename=zip_name, media_type='application/zip')
 
-# --- APIエンドポイント：ヘルスチェック or トップページアクセス用 ---
+# --- ヘルスチェック用 ---
 @app.get("/")
 async def root():
     return {"message": "✅ Image Trim API is running!"}
 
-# --- ローカル開発用エントリーポイント ---
+# --- ローカル実行時のエントリーポイント ---
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
