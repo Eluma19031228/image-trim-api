@@ -1,7 +1,7 @@
-# ベースイメージ：OpenCV動作に必要なGLライブラリを含むDebianベース
+# ベースイメージ
 FROM python:3.10-slim
 
-# OpenCVが必要とするライブラリをインストール
+# OpenCVなど必要な依存ライブラリをインストール
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -10,14 +10,14 @@ RUN apt-get update && apt-get install -y \
 # 作業ディレクトリを設定
 WORKDIR /app
 
-# ローカルのコードと依存ファイルをコピー
+# アプリコードをコピー
 COPY . .
 
-# 依存パッケージをインストール
+# Pythonパッケージをインストール
 RUN pip install --no-cache-dir -r requirements.txt
 
-# EXPOSEはそのままでOK
+# EXPOSEは意図を示すだけでOK
 EXPOSE 8080
 
-# CMD：PORTの環境変数をちゃんと使える形式に
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT}
+# 🚨 ポートをShell展開できる形式に（ここが重要）
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
