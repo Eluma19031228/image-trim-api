@@ -4,27 +4,31 @@ import uuid
 from pathlib import Path
 from typing import List
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageOps
 import numpy as np
 from ultralytics import YOLO
+import os
 
+# FastAPIインスタンス
 app = FastAPI()
-from fastapi.middleware.cors import CORSMiddleware
 
+# CORS（フロントと連携用）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 後でNext.jsドメインだけに絞ってもOK
+    allow_origins=["*"],  # 本番では["https://yourdomain.com"]などに変更推奨
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # --- 設定 ---
 OUTPUT_WIDTH, OUTPUT_HEIGHT = 750, 900
 OUTPUT_FOLDER = Path("output")
 OUTPUT_FOLDER.mkdir(exist_ok=True)
+
+# YOLOモデル
 model = YOLO("yolov8n.pt")
 
 
@@ -53,6 +57,12 @@ def process_image(img: Image.Image) -> Image.Image:
     return resize_with_padding(img)
 
 
+# --- 動作確認用ルート ---
+@app.get("/")
+def root():
+    return JSONResponse(content={"status": "ok", "message": "Image Trim API is running."})
+
+
 # --- 一括アップロード&ZIP返却 ---
 @app.post("/batch-trim-zip/")
 async def batch_trim_zip(files: List[UploadFile] = File(...)):
@@ -76,9 +86,14 @@ async def batch_trim_zip(files: List[UploadFile] = File(...)):
             output_img_path.unlink(missing_ok=True)
 
     return FileResponse(zip_path, filename=zip_name, media_type='application/zip')
+
+
+# --- エントリーポイント（Railway対応）---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
 
 
 
