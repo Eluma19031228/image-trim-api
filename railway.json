@@ -3,7 +3,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": ""  // DockerfileがCMDを持っているので空でOK
+    "startCommand": ""
   }
 }
 
