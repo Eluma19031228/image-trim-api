@@ -1,17 +1,16 @@
 """
-main.py  – Image‑Trim API  (FastAPI + YOLOv8)
+main.py – Image‑Trim API  (FastAPI + YOLOv8)
 ---------------------------------------------
 GET  /                  : health‑check
 POST /trim-single/      : 1 枚トリミング → URL 返却
 POST /batch-trim-zip/   : 複数枚 ZIP 返却
     └ query ?focus=full|upper|lower
 ---------------------------------------------
-Railway / Docker でそのまま起動できます
 """
 
 import shutil, zipfile, uuid
 from pathlib import Path
-from typing   import List, Tuple, Optional
+from typing import List, Tuple, Optional
 
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,18 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from PIL import Image, ImageOps, ImageChops
-import pillow_avif          # AVIF 対応
+import pillow_avif
 import numpy as np, requests
 from ultralytics import YOLO
 from io import BytesIO
 
 # ----------------- 基本設定 -----------------
-WIDTH, HEIGHT   = 750, 900
-OUT_DIR         = Path("output"); OUT_DIR.mkdir(exist_ok=True)
-MODEL_PATH      = Path("yolov8n.pt")
-FOCUS_OPTIONS   = ("full", "upper", "lower")          # ↓ query で指定
+WIDTH, HEIGHT = 750, 900
+OUT_DIR = Path("output"); OUT_DIR.mkdir(exist_ok=True)
+MODEL_PATH = Path("yolov8n.pt")
+FOCUS_OPTIONS = ("full", "upper", "lower")
 
-if not MODEL_PATH.exists():                           # Railway 初回
+if not MODEL_PATH.exists():
     url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
     MODEL_PATH.write_bytes(requests.get(url).content)
 
@@ -45,18 +44,17 @@ app.mount("/output", StaticFiles(directory="output"), name="output")
 
 # ----------------- Utility -----------------
 def remove_uniform_border(img: Image.Image, tol: int = 5) -> Image.Image:
-    """背景が単色の余白を自動でトリム"""
-    bg   = Image.new(img.mode, img.size, img.getpixel((0, 0)))
+    bg = Image.new(img.mode, img.size, img.getpixel((0, 0)))
     diff = ImageChops.difference(img, bg).convert("L")
     bbox = diff.point(lambda p: p > tol and 255).getbbox()
     return img.crop(bbox) if bbox else img
 
-def detect_person(img: Image.Image, conf=0.5) -> Optional[Tuple[int,int,int,int]]:
+def detect_person(img: Image.Image, conf=0.5) -> Optional[Tuple[int, int, int, int]]:
     arr = np.array(img)
     best, score = None, 0
     for r in yolo(arr, conf=conf):
         for b in r.boxes:
-            if b.cls.cpu().numpy()[0] == 0:           # class 0 = person
+            if b.cls.cpu().numpy()[0] == 0:
                 s = b.conf.cpu().numpy()[0]
                 if s > score:
                     best, score = tuple(map(int, b.xyxy.cpu().numpy()[0])), s
@@ -64,28 +62,38 @@ def detect_person(img: Image.Image, conf=0.5) -> Optional[Tuple[int,int,int,int]
 
 def adjust_box(box, w, h, focus: str):
     x1, y1, x2, y2 = box
-    pad = int((y2-y1)*.20)
-    x1, y1 = max(0, x1-pad), max(0, y1-pad)
-    x2, y2 = min(w, x2+pad), min(h, y2+pad)
+    pad = int((y2 - y1) * 0.20)
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
 
-    if focus == "upper":                              # トップス重視
-        y2 = min(h, y1 + int((y2-y1)*.70))            # 肩〜腰下を確実に
-    elif focus == "lower":                            # ボトムス重視
-        shift = int((y2-y1)*.30)                      # 顔を残して下へシフト
+    person_height = y2 - y1
+
+    if focus == "upper":
+        y2 = min(h, y1 + int(person_height * 0.7))
+    elif focus == "lower":
+        shift = int(person_height * 0.3)
         if y2 + shift <= h:
-            y1, y2 = y1+shift, y2+shift
+            y1, y2 = y1 + shift, y2 + shift
 
-    # 3:4 アスペクト補正
-    cur, tgt = (x2-x1)/(y2-y1), 3/4
-    if cur > tgt:
-        cx = (x1+x2)//2; new_w = int((y2-y1)*tgt)
-        x1, x2 = cx-new_w//2, cx+new_w//2
+    # 🔷 頭上余白が多すぎる場合のトリミング
+    top_padding = y1
+    if top_padding > int(0.15 * h):
+        diff = top_padding - int(0.05 * h)
+        y1 = max(0, y1 - diff)
+
+    # アスペクト比補正（3:4）
+    cur_ratio, tgt_ratio = (x2 - x1) / (y2 - y1), 3 / 4
+    if cur_ratio > tgt_ratio:
+        cx = (x1 + x2) // 2
+        new_w = int((y2 - y1) * tgt_ratio)
+        x1, x2 = cx - new_w // 2, cx + new_w // 2
     else:
-        new_h = int((x2-x1)/tgt)
-        y2 = min(h, y1+new_h)
+        new_h = int((x2 - x1) / tgt_ratio)
+        y2 = min(h, y1 + new_h)
+
     return x1, y1, x2, y2
 
-def resize(img):                                      # 高画質リサイズ
+def resize(img):
     return ImageOps.fit(img, (WIDTH, HEIGHT), Image.LANCZOS)
 
 def process(img: Image.Image, focus: str):
@@ -106,7 +114,7 @@ def save_temp(u: UploadFile):
 # ----------------- Endpoints -----------------
 @app.post("/trim-single/")
 async def trim_single(
-        file : UploadFile = File(...),
+        file: UploadFile = File(...),
         focus: str = Query("full", regex="^(full|upper|lower)$")
     ):
     tmp = save_temp(file)
@@ -125,7 +133,6 @@ async def trim_single(
     result.save(out_path, optimize=True)
     tmp.unlink(missing_ok=True)
     return {"image_url": f"/output/{out_path.name}"}
-
 
 @app.post("/batch-trim-zip/")
 async def batch_trim_zip(
@@ -154,7 +161,6 @@ async def batch_trim_zip(
 
     return FileResponse(zip_path, filename=zip_name, media_type="application/zip")
 
-
 @app.get("/")
 async def root():
     return {"message": "✅ Image Trim API is running!"}
@@ -163,6 +169,7 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
 
 
 
