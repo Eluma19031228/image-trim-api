@@ -1,176 +1,169 @@
-import zipfile
-import shutil
-import uuid
+"""
+main.py  – Image‑Trim API  (FastAPI + YOLOv8)
+---------------------------------------------
+GET  /                  : health‑check
+POST /trim-single/      : 1 枚トリミング → URL 返却
+POST /batch-trim-zip/   : 複数枚 ZIP 返却
+    └ query ?focus=full|upper|lower
+---------------------------------------------
+Railway / Docker でそのまま起動できます
+"""
+
+import shutil, zipfile, uuid
 from pathlib import Path
-from typing import List, Tuple, Optional
-from fastapi import FastAPI, UploadFile, File
+from typing   import List, Tuple, Optional
+
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps
-import pillow_avif  # AVIF形式を有効化
-import numpy as np
+
+from PIL import Image, ImageOps, ImageChops
+import pillow_avif          # AVIF 対応
+import numpy as np, requests
 from ultralytics import YOLO
-import requests
 from io import BytesIO
 
+# ----------------- 基本設定 -----------------
+WIDTH, HEIGHT   = 750, 900
+OUT_DIR         = Path("output"); OUT_DIR.mkdir(exist_ok=True)
+MODEL_PATH      = Path("yolov8n.pt")
+FOCUS_OPTIONS   = ("full", "upper", "lower")          # ↓ query で指定
+
+if not MODEL_PATH.exists():                           # Railway 初回
+    url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
+    MODEL_PATH.write_bytes(requests.get(url).content)
+
+yolo = YOLO(str(MODEL_PATH))
+
 app = FastAPI()
-
-# CORS設定
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"]
 )
-
-# 出力フォルダ設定
-OUTPUT_WIDTH, OUTPUT_HEIGHT = 750, 900
-OUTPUT_FOLDER = Path("output")
-OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
-
-# 静的ファイル公開
 app.mount("/output", StaticFiles(directory="output"), name="output")
 
-# YOLOv8 モデル準備
-MODEL_PATH = Path("yolov8n.pt")
-if not MODEL_PATH.exists():
-    url = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
-    with open(MODEL_PATH, "wb") as f:
-        f.write(requests.get(url).content)
+# ----------------- Utility -----------------
+def remove_uniform_border(img: Image.Image, tol: int = 5) -> Image.Image:
+    """背景が単色の余白を自動でトリム"""
+    bg   = Image.new(img.mode, img.size, img.getpixel((0, 0)))
+    diff = ImageChops.difference(img, bg).convert("L")
+    bbox = diff.point(lambda p: p > tol and 255).getbbox()
+    return img.crop(bbox) if bbox else img
 
-model = YOLO(str(MODEL_PATH))
+def detect_person(img: Image.Image, conf=0.5) -> Optional[Tuple[int,int,int,int]]:
+    arr = np.array(img)
+    best, score = None, 0
+    for r in yolo(arr, conf=conf):
+        for b in r.boxes:
+            if b.cls.cpu().numpy()[0] == 0:           # class 0 = person
+                s = b.conf.cpu().numpy()[0]
+                if s > score:
+                    best, score = tuple(map(int, b.xyxy.cpu().numpy()[0])), s
+    return best
 
-# 人物検出
-def detect_person_box(img: Image.Image) -> Optional[Tuple[int, int, int, int]]:
-    img_np = np.array(img)
-    results = model(img_np, conf=0.5)
-    best_box = None
-    best_score = 0
-    for result in results:
-        for box in result.boxes:
-            if box.cls.cpu().numpy()[0] == 0:  # class 0 = person
-                confidence = box.conf.cpu().numpy()[0]
-                if confidence > best_score:
-                    x1, y1, x2, y2 = map(int, box.xyxy.cpu().numpy()[0])
-                    best_box = (x1, y1, x2, y2)
-                    best_score = confidence
-    return best_box
-
-# トリミング領域調整
-def optimize_crop_box(box: Tuple[int, int, int, int], img_width: int, img_height: int) -> Tuple[int, int, int, int]:
+def adjust_box(box, w, h, focus: str):
     x1, y1, x2, y2 = box
-    height = y2 - y1
-    padding = int(height * 0.2)
-    x1 = max(0, x1 - padding)
-    y1 = max(0, y1 - padding)
-    x2 = min(img_width, x2 + padding)
-    y2 = min(img_height, y2 + padding)
+    pad = int((y2-y1)*.20)
+    x1, y1 = max(0, x1-pad), max(0, y1-pad)
+    x2, y2 = min(w, x2+pad), min(h, y2+pad)
 
-    current_ratio = (x2 - x1) / (y2 - y1)
-    target_ratio = 3 / 4
-    if current_ratio > target_ratio:
-        center_x = (x1 + x2) // 2
-        width = int((y2 - y1) * target_ratio)
-        x1 = center_x - width // 2
-        x2 = center_x + width // 2
+    if focus == "upper":                              # トップス重視
+        y2 = min(h, y1 + int((y2-y1)*.70))            # 肩〜腰下を確実に
+    elif focus == "lower":                            # ボトムス重視
+        shift = int((y2-y1)*.30)                      # 顔を残して下へシフト
+        if y2 + shift <= h:
+            y1, y2 = y1+shift, y2+shift
+
+    # 3:4 アスペクト補正
+    cur, tgt = (x2-x1)/(y2-y1), 3/4
+    if cur > tgt:
+        cx = (x1+x2)//2; new_w = int((y2-y1)*tgt)
+        x1, x2 = cx-new_w//2, cx+new_w//2
     else:
-        height = int((x2 - x1) / target_ratio)
-        y2 = min(img_height, y1 + height)
+        new_h = int((x2-x1)/tgt)
+        y2 = min(h, y1+new_h)
+    return x1, y1, x2, y2
 
-    return (x1, y1, x2, y2)
+def resize(img):                                      # 高画質リサイズ
+    return ImageOps.fit(img, (WIDTH, HEIGHT), Image.LANCZOS)
 
-# 高品質リサイズ
-def resize_with_padding(img: Image.Image) -> Image.Image:
-    return ImageOps.fit(img, (OUTPUT_WIDTH, OUTPUT_HEIGHT), method=Image.LANCZOS)
+def process(img: Image.Image, focus: str):
+    box = detect_person(img)
+    if not box:
+        return None
+    box = adjust_box(box, img.width, img.height, focus)
+    out = img.crop(box)
+    out = remove_uniform_border(out)
+    return resize(out)
 
-# メイン画像処理
-def process_image(img: Image.Image) -> Image.Image:
-    box = detect_person_box(img)
-    if box:
-        box = optimize_crop_box(box, img.width, img.height)
-        img = img.crop(box)
-    return resize_with_padding(img)
+def save_temp(u: UploadFile):
+    tmp = Path(f"{uuid.uuid4().hex}.png")
+    with tmp.open("wb") as bf:
+        shutil.copyfileobj(u.file, bf)
+    return tmp
 
-# --- 複数画像ZIPエンドポイント ---
+# ----------------- Endpoints -----------------
+@app.post("/trim-single/")
+async def trim_single(
+        file : UploadFile = File(...),
+        focus: str = Query("full", regex="^(full|upper|lower)$")
+    ):
+    tmp = save_temp(file)
+    try:
+        img = Image.open(tmp).convert("RGB")
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        return JSONResponse(400, {"error": str(e)})
+
+    result = process(img, focus)
+    if result is None:
+        tmp.unlink(missing_ok=True)
+        return JSONResponse(422, {"error": "person not detected"})
+
+    out_path = OUT_DIR / f"trimmed_{tmp.stem}.png"
+    result.save(out_path, optimize=True)
+    tmp.unlink(missing_ok=True)
+    return {"image_url": f"/output/{out_path.name}"}
+
+
 @app.post("/batch-trim-zip/")
-async def batch_trim_zip(files: List[UploadFile] = File(...)):
-    zip_name = f"trimmed_images_{uuid.uuid4().hex}.zip"
-    zip_path = OUTPUT_FOLDER / zip_name
+async def batch_trim_zip(
+        files: List[UploadFile] = File(...),
+        focus: str = Query("full", regex="^(full|upper|lower)$")
+    ):
+    zip_name = f"trimmed_{uuid.uuid4().hex}.zip"
+    zip_path = OUT_DIR / zip_name
 
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for file in files:
-            temp_path = Path(f"{uuid.uuid4().hex}.png")
-            with temp_path.open("wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in files:
+            tmp = save_temp(f)
             try:
-                img = Image.open(temp_path).convert("RGB")
-            except Exception as e:
-                return JSONResponse(status_code=400, content={"error": f"{file.filename} 読み込み失敗: {str(e)}"})
+                img = Image.open(tmp).convert("RGB")
+            except Exception:
+                tmp.unlink(); continue
 
-            resized = process_image(img)
-            output_img_path = OUTPUT_FOLDER / f"trimmed_{temp_path.stem}.png"
-            resized.save(output_img_path, quality=95)
-            zipf.write(output_img_path, arcname=output_img_path.name)
-            temp_path.unlink(missing_ok=True)
-            output_img_path.unlink(missing_ok=True)
+            res = process(img, focus)
+            if res is None:
+                tmp.unlink(); continue
+
+            out_img = OUT_DIR / f"trim_{tmp.stem}.png"
+            res.save(out_img, optimize=True)
+            zf.write(out_img, arcname=out_img.name)
+            tmp.unlink(); out_img.unlink()
 
     return FileResponse(zip_path, filename=zip_name, media_type="application/zip")
 
-# --- 単一画像処理 ---
-@app.post("/trim-single/")
-async def trim_single(file: UploadFile = File(...)):
-    temp_path = OUTPUT_FOLDER / f"temp_{uuid.uuid4().hex}.png"
-    with temp_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    try:
-        img = Image.open(temp_path).convert("RGB")
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"読み込み失敗: {str(e)}"})
-    resized = process_image(img)
-    output_path = OUTPUT_FOLDER / f"trimmed_{temp_path.stem}.png"
-    resized.save(output_path, quality=95)
-    temp_path.unlink(missing_ok=True)
-    return {"image_url": f"/output/{output_path.name}"}
 
-# --- プレビュー ---
-@app.post("/test-preview/")
-async def test_preview(file: UploadFile = File(...)):
-    temp_path = OUTPUT_FOLDER / f"preview_{uuid.uuid4().hex}.png"
-    with temp_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    try:
-        img = Image.open(temp_path).convert("RGB")
-    except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"読み込み失敗: {str(e)}"})
-    result = process_image(img)
-    result.save(temp_path, quality=95)
-    return {"image_url": f"/output/{temp_path.name}"}
-
-# --- サンプル画像 ---
-@app.get("/test-sample/")
-async def test_sample():
-    sample_url = "https://example.com/sample-apparel.jpg"
-    try:
-        response = requests.get(sample_url)
-        img = Image.open(BytesIO(response.content)).convert("RGB")
-        resized = process_image(img)
-        output_path = OUTPUT_FOLDER / "sample_result.png"
-        resized.save(output_path, quality=95)
-        return {"image_url": "/output/sample_result.png"}
-    except Exception as e:
-        return {"error": str(e)}
-
-# --- ヘルスチェック ---
 @app.get("/")
 async def root():
     return {"message": "✅ Image Trim API is running!"}
 
-# --- ローカル起動 ---
+# ----------------- Local dev -----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
 
 
 
