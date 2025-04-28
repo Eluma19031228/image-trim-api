@@ -71,5 +71,5 @@ print(f"✅ 保存完了: {output_path}")
 for img_file in INPUT_FOLDER.glob("*.jpg"):
     process_image(img_file)
 
-print("🎉 すべての処理が完了しました！")
+print("🎉 すべての処理が完了しました!!!")
 
